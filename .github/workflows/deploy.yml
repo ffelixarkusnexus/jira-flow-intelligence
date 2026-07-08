@@ -165,10 +165,12 @@ jobs:
   deploy:
     name: Deploy ${{ needs.resolve.outputs.env }}
     needs: [resolve, changes]
-    # Skip the entire deploy job when nothing the deploy can act on
-    # actually changed (e.g. backend/tests/** only, or doc-only commits
-    # that slipped through CI's paths-ignore).
-    if: needs.changes.outputs.any_relevant == 'true'
+    # Gated OFF by default: runs only when the repo owner sets the
+    # DEPLOY_ENABLED=true repository variable. This reference repo (and every
+    # fork) leaves it unset, so no real deploy ever runs. Also skipped when
+    # nothing the deploy can act on changed (backend/tests-only or doc-only
+    # commits that slipped through CI's paths-ignore).
+    if: vars.DEPLOY_ENABLED == 'true' && needs.changes.outputs.any_relevant == 'true'
     runs-on: ubuntu-latest
     environment: ${{ needs.resolve.outputs.env }}
     env:
@@ -321,7 +323,8 @@ jobs:
   forge_deploy_dev:
     name: Forge deploy (development)
     needs: [resolve, changes]
-    if: needs.changes.outputs.forge == 'true'
+    # Gated OFF by default — see the DEPLOY_ENABLED note on the `deploy` job.
+    if: vars.DEPLOY_ENABLED == 'true' && needs.changes.outputs.forge == 'true'
     runs-on: ubuntu-latest
     env:
       FORGE_EMAIL: ${{ secrets.FORGE_EMAIL }}
