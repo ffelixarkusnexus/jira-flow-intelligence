@@ -20,6 +20,11 @@ service behind it. Every value you must change is listed in
 [Configure your own values](#configure-your-own-values) below — no hidden
 placeholders.
 
+Nothing here is wired to live infrastructure: CI runs the tests; the deploy
+workflow stays off until you connect your own AWS account (see
+[SETUP §G](docs/SETUP.md#g-cicd--automated-deploys-optional)). Replace the
+placeholders and it installs on your own Jira site — no Marketplace required.
+
 ## What's in the box
 
 | Area | Path | What it is |

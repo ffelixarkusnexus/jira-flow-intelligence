@@ -8,6 +8,12 @@ README — keep that open alongside this guide.
 Prerequisites: [Node.js](https://nodejs.org/) 22+, [uv](https://docs.astral.sh/uv/)
 (Python package manager), and `git`. AWS is optional (step F).
 
+> **You do NOT need the Atlassian Marketplace to use this.** `forge install`
+> puts the app directly on any Jira site you administer — your free dev site, or
+> your company's site — for personal or internal use. The Marketplace is only for
+> distributing to **other** organizations; if that's your goal, see
+> [PUBLISHING.md](PUBLISHING.md).
+
 ## A. Create a free Atlassian developer account + Cloud dev site
 
 1. Sign up at <https://developer.atlassian.com/> (free).
@@ -88,6 +94,10 @@ populate synthetic issues if you want to see fully-formed charts immediately.
 > Forge packages whatever is in `dist/` and `static/main/` without rebuilding.
 > See the [runbook](engineering/runbook.md) for the full deploy semantics.
 
+That `forge install` is all you need for personal or internal use — the app now
+runs on your own Jira site with no Marketplace listing involved. Distributing to
+**other** organizations is a separate step; see [PUBLISHING.md](PUBLISHING.md).
+
 ## F. Optional — deploy the backend to AWS with CDK
 
 For a real deployment (instead of a local tunnel), the `infra/` CDK app
@@ -108,6 +118,35 @@ Configure the deploy-time infra values (also in the README config table):
   you then subscribe manually (see the runbook's "Operational alerting" section).
 - `HEALTHZ_HOST` — the public host Route 53 pings for the prod `/healthz` check
   (`-c healthz_host=...`).
+
+## G. CI/CD & automated deploys (optional)
+
+The repo ships two GitHub Actions workflows:
+
+- **`ci.yml`** — the test suite: backend lint / type-check / tests, a Postgres
+  smoke test, the Forge build, and infra `cdk synth` + tests. Runs on every pull
+  request. This is the only workflow that does anything on this reference repo.
+- **`deploy.yml`** — a CDK deploy that fires after CI succeeds on
+  `main` / `develop` / `feature/**`. It is wired to *run*, but it has nothing to
+  deploy *to* until you connect an AWS account.
+
+> **Caveat — this reference repo is not connected to any live infrastructure.**
+> No AWS account, GitHub environments, or deploy credentials are configured, so
+> `deploy.yml` performs no real deploy here (it has never run against a real
+> account) — **CI runs the test suite only.** Nothing in this repo touches live
+> infrastructure until *you* wire it up on your own copy.
+
+To enable automated deploys on **your own** repository:
+
+1. **`scripts/aws-bootstrap.sh`** — creates the GitHub OIDC identity provider and
+   the deploy IAM role in your AWS account. Set `<YOUR_AWS_ACCOUNT_ID>` and
+   `<YOUR_GITHUB_ORG>` at the top of the script first.
+2. **`scripts/github-environments.sh`** — creates the `dev` / `staging` / `prod`
+   GitHub environments and sets the AWS account/region variables + the
+   deploy-role secret on each.
+
+After that, enable GitHub Actions on your copy and pushes to the mapped branches
+deploy automatically.
 
 After deploy, point `forge-prod/manifest.yml` → `remotes[].baseUrl` at the
 backend URL (the `BackendUrl` stack output or your custom domain), then redeploy
