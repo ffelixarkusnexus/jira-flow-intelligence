@@ -126,15 +126,16 @@ The repo ships two GitHub Actions workflows:
 - **`ci.yml`** — the test suite: backend lint / type-check / tests, a Postgres
   smoke test, the Forge build, and infra `cdk synth` + tests. Runs on every pull
   request. This is the only workflow that does anything on this reference repo.
-- **`deploy.yml`** — a CDK deploy that fires after CI succeeds on
-  `main` / `develop` / `feature/**`. It is wired to *run*, but it has nothing to
-  deploy *to* until you connect an AWS account.
+- **`deploy.yml`** — a CDK + Forge deploy that fires after CI succeeds on
+  `main` / `develop` / `feature/**`. Its deploy jobs are **gated off by default**
+  behind a `DEPLOY_ENABLED` repository variable, so the workflow never runs a real
+  deploy unless you explicitly opt in — on this repo and on every fork alike.
 
 > **Caveat — this reference repo is not connected to any live infrastructure.**
-> No AWS account, GitHub environments, or deploy credentials are configured, so
-> `deploy.yml` performs no real deploy here (it has never run against a real
-> account) — **CI runs the test suite only.** Nothing in this repo touches live
-> infrastructure until *you* wire it up on your own copy.
+> No AWS account, GitHub environments, or deploy credentials are configured, and
+> `DEPLOY_ENABLED` is unset, so `deploy.yml`'s deploy jobs are skipped — **CI runs
+> the test suite only.** Nothing in this repo touches live infrastructure until
+> *you* wire it up on your own copy.
 
 To enable automated deploys on **your own** repository:
 
@@ -144,9 +145,11 @@ To enable automated deploys on **your own** repository:
 2. **`scripts/github-environments.sh`** — creates the `dev` / `staging` / `prod`
    GitHub environments and sets the AWS account/region variables + the
    deploy-role secret on each.
+3. **Set the `DEPLOY_ENABLED` repository variable to `true`** — Settings → Secrets
+   and variables → Actions → **Variables** → New repository variable. This is the
+   opt-in switch; without it the deploy jobs stay skipped.
 
-After that, enable GitHub Actions on your copy and pushes to the mapped branches
-deploy automatically.
+After that, pushes to the mapped branches deploy automatically.
 
 After deploy, point `forge-prod/manifest.yml` → `remotes[].baseUrl` at the
 backend URL (the `BackendUrl` stack output or your custom domain), then redeploy
