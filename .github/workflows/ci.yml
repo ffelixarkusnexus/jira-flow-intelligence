@@ -1,0 +1,288 @@
+name: CI
+
+# Path-aware CI: every job is gated on whether the commit actually touched
+# the area that job exercises. A `changes` job runs first and computes a
+# boolean per area (backend / infra / forge); the other jobs depend on it
+# via `needs: changes` + `if: needs.changes.outputs.<area> == 'true'`. This
+# mirrors the same design Deploy uses (see `.github/workflows/deploy.yml`)
+# so the two workflows think about change-detection the same way; the
+# scripts must stay aligned (keep paths in sync).
+#
+# Layering with workflow-trigger `paths-ignore` below:
+#   - `paths-ignore` skips the whole CI workflow when a commit ONLY touches
+#     truly documentation paths (`*.md`, `docs/**`, LICENSE, `.gitignore`,
+#     `.github/dependabot.yml`). Cheapest exit — no runner spin-up at all.
+#   - For any commit that DOES start CI, the `changes` job decides which
+#     of backend / infra / forge actually need to run. The remaining jobs
+#     are skipped via `if:` clauses when their area is unaffected.
+#
+# Net effect: a dependabot.yml-only commit starts no CI workflow. A
+# forge-only commit runs only `changes` + `forge`. A backend-only commit
+# runs only `changes` + `backend` (matrix) + `backend-postgres`. The CI
+# UI no longer shows five jobs running for changes none of them test.
+on:
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.github/dependabot.yml'
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.github/dependabot.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Single source of truth for "what changed in this commit." Same shape
+  # and same path-set as Deploy's `changes` job — keep aligned. If the
+  # two diverge in practice, that's the cue to extract into a composite
+  # action; for now duplicating ~30 lines beats the action machinery.
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.detect.outputs.backend }}
+      infra: ${{ steps.detect.outputs.infra }}
+      forge: ${{ steps.detect.outputs.forge }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need HEAD~1 for `git diff` (push to main) or merge-base side
+          # for `git diff HEAD~1 HEAD` on PR merge commits.
+          fetch-depth: 2
+      - id: detect
+        run: |
+          set -euo pipefail
+          # Fail-safe: if HEAD~1 isn't available (shallow clone, first
+          # commit on a fresh branch), force every job to run rather
+          # than risk silently skipping a real test cycle.
+          if ! git rev-parse HEAD~1 >/dev/null 2>&1; then
+            echo "HEAD~1 unavailable — forcing all CI jobs (fail-safe)."
+            {
+              echo "backend=true"
+              echo "infra=true"
+              echo "forge=true"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CHANGED=$(git diff --name-only HEAD~1 HEAD)
+          echo "Changed files vs HEAD~1:"
+          echo "$CHANGED"
+          backend=false
+          infra=false
+          forge=false
+          # Backend = anything that would land in `uv run pytest` /
+          # `mypy backend` / `ruff backend`. Includes `backend/tests/**`
+          # because tests are part of what CI verifies (this is broader
+          # than Deploy's `backend_image` filter, which excludes tests
+          # because they don't ship in the image).
+          if echo "$CHANGED" | grep -qE '^(backend/|pyproject\.toml|uv\.lock)'; then
+            backend=true
+          fi
+          if echo "$CHANGED" | grep -qE '^infra/'; then
+            infra=true
+          fi
+          # Forge: same source paths Deploy uses for forge_deploy_dev.
+          if echo "$CHANGED" | grep -qE '^forge-prod/(frontend/src/|src/|manifest\.yml|package(-lock)?\.json|tsconfig\.json|frontend/package(-lock)?\.json|frontend/tsconfig)'; then
+            forge=true
+          fi
+          # Workflow change → force all jobs to exercise the new shape
+          # end-to-end on this commit, same pattern Deploy uses for its
+          # own workflow file.
+          if echo "$CHANGED" | grep -qE '^\.github/workflows/ci\.yml$'; then
+            backend=true
+            infra=true
+            forge=true
+          fi
+          {
+            echo "backend=$backend"
+            echo "infra=$infra"
+            echo "forge=$forge"
+          } >> "$GITHUB_OUTPUT"
+          echo "Computed: backend=$backend infra=$infra forge=$forge"
+
+  backend:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    name: backend (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --all-extras --group dev
+
+      - name: Lint (ruff check)
+        run: uv run ruff check backend
+
+      - name: Format check (ruff format)
+        run: uv run ruff format --check backend
+
+      - name: Type-check (mypy)
+        run: uv run mypy
+
+      - name: Tests + coverage
+        run: uv run pytest --cov --cov-report=xml --cov-report=term
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.python-version }}
+          path: coverage.xml
+          retention-days: 7
+
+  backend-postgres:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    # Postgres-side smoke for the RLS GUC binding + any future
+    # dialect-specific code path. See backend/tests/test_postgres_rls_smoke.py.
+    # The standard `backend` job runs against SQLite (fast, no service
+    # container) — this job catches the dialect-only gaps.
+    name: backend-postgres (smoke)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: flow_smoke
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/flow_smoke
+      PYTHONPATH: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies (with postgres extra)
+        run: uv sync --all-extras --group dev
+
+      - name: Run Postgres smoke tests
+        run: uv run pytest -m postgres backend/tests/test_postgres_rls_smoke.py -v
+
+  forge:
+    needs: changes
+    if: needs.changes.outputs.forge == 'true'
+    name: forge (custom UI build + lint)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: forge-prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install resolver dependencies
+        run: npm ci --no-fund --no-audit
+
+      - name: Install Custom UI dependencies
+        working-directory: forge-prod/frontend
+        run: npm ci --no-fund --no-audit
+
+      - name: Type-check resolvers
+        run: npm run tsc
+
+      - name: Type-check Custom UI
+        working-directory: forge-prod/frontend
+        run: npm run typecheck
+
+      - name: Build Custom UI bundle
+        working-directory: forge-prod/frontend
+        run: npm run build
+
+      # Vitest suite (ADR-0039). Coverage gate is per-file inside
+      # vitest.config.ts — strict 80% on `src/lib/{duration,
+      # alertGrouping,format}.ts` (the files this ADR scopes), no gate
+      # on components in this first pass (gate grows as coverage grows).
+      - name: Run Vitest + coverage
+        working-directory: forge-prod/frontend
+        run: npm run test:coverage
+
+      - name: Upload Forge UI coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-forge-ui
+          path: forge-prod/frontend/coverage/lcov.info
+          retention-days: 7
+
+  infra:
+    needs: changes
+    if: needs.changes.outputs.infra == 'true'
+    name: infra (cdk synth + tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: infra/uv.lock
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Lint (ruff check)
+        run: uv run ruff check .
+
+      - name: Format check (ruff format)
+        run: uv run ruff format --check .
+
+      - name: Type-check (mypy)
+        run: uv run mypy
+
+      # Synthesis correctness is covered by the CDK assertion tests below
+      # (each Template.from_stack() runs a full synth internally for that
+      # stack). Standalone `cdk synth` from the CLI is redundant AND
+      # requires AWS credentials in CDK v2 because it does a bootstrap
+      # qualifier lookup against the target account, which we don't want
+      # to wire up in CI just for a redundant check.
+      - name: Tests (CDK assertions)
+        run: uv run pytest

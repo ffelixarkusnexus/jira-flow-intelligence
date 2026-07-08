@@ -1,0 +1,34 @@
+# Common
+.git
+.github
+.venv
+.idea
+.vscode
+*.md
+docs
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+.coverage.*
+coverage.xml
+htmlcov
+*.egg-info
+
+# Local DB / artifacts
+backend/data
+*.db
+
+# Frontend (excluded from backend image; per-Dockerfile context narrows further)
+frontend/node_modules
+frontend/.next
+frontend/out
+
+# Infra
+infra
+cdk.out

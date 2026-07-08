@@ -1,0 +1,115 @@
+# Setup
+
+A from-zero walkthrough to run Jira Flow Intelligence against your own Atlassian
+account. Everything you fill in maps to a row in the
+[Configure your own values](../README.md#configure-your-own-values) table in the
+README — keep that open alongside this guide.
+
+Prerequisites: [Node.js](https://nodejs.org/) 22+, [uv](https://docs.astral.sh/uv/)
+(Python package manager), and `git`. AWS is optional (step F).
+
+## A. Create a free Atlassian developer account + Cloud dev site
+
+1. Sign up at <https://developer.atlassian.com/> (free).
+2. Create a **free Cloud developer site** at
+   <https://go.atlassian.com/cloud-dev> — you get a `your-site.atlassian.net`
+   Jira instance to install the app into. Add a project and a few issues so the
+   dashboard has data to chart.
+
+## B. Install the Forge CLI and register the app
+
+```bash
+npm install -g @forge/cli
+forge login          # uses your Atlassian email + an API token
+
+cd forge-prod
+npm install
+forge register       # names the app and mints its ARI
+```
+
+`forge register` prints the app id — an ARI like
+`ari:cloud:ecosystem::app/00000000-0000-0000-0000-000000000000`. Paste it into
+**two** places:
+
+- `forge-prod/manifest.yml` → `app.id` (replaces `REPLACE-WITH-YOUR-APP-ID`).
+- Your backend `.env` → `FORGE_APP_ID` (same value; it's the FIT audience).
+
+## C. Get a Jira API token and fill `.env`
+
+1. Create an API token at
+   <https://id.atlassian.com/manage-profile/security/api-tokens>.
+2. Copy the template and fill it in:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   Set at least `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_JQL`, and
+   `FORGE_APP_ID`. For email, either set `RESEND_DRY_RUN=1` (logs sends, hits no
+   network) or provide a `RESEND_API_KEY` + verified-domain addresses. Every
+   field is explained in `.env.example` and the README config table.
+
+## D. Run the backend locally
+
+```bash
+uv sync
+
+# Apply migrations (SQLite by default — no database server needed for local dev)
+DATABASE_URL=sqlite:///backend/data/flow.db PYTHONPATH=backend uv run alembic upgrade head
+
+# Run it
+PYTHONPATH=backend uv run uvicorn app.main:app --reload
+```
+
+The API is now at <http://localhost:8000> (docs at `/docs`). Leaving
+`FORGE_APP_ID` empty runs the backend without Forge auth — handy for poking the
+engine locally with `curl`; never deploy it that way.
+
+To reach the backend from inside Jira during development, run `forge tunnel`
+(next step) or expose it with a tunnel (ngrok / Cloudflare Tunnel) and point the
+manifest `remotes[].baseUrl` at that URL.
+
+## E. Deploy the Forge app and install it on your dev site
+
+```bash
+cd forge-prod
+npm run tsc                              # build resolvers -> dist/
+cd frontend && npm run build && cd ..    # build Custom UI -> static/main/
+
+forge deploy --environment development
+forge install --environment development --site your-site.atlassian.net --product Jira --confirm-scopes
+```
+
+Open your project in Jira → the **Flow Intelligence** page appears on the
+project sidebar. Use the **Settings tab → Load demo data** button (dev only) to
+populate synthetic issues if you want to see fully-formed charts immediately.
+
+> **Both** `npm run tsc` and `npm run build` are mandatory before every deploy —
+> Forge packages whatever is in `dist/` and `static/main/` without rebuilding.
+> See the [runbook](engineering/runbook.md) for the full deploy semantics.
+
+## F. Optional — deploy the backend to AWS with CDK
+
+For a real deployment (instead of a local tunnel), the `infra/` CDK app
+provisions ECR, VPC, RDS Postgres, App Runner, and observability.
+
+```bash
+cd infra
+uv sync
+AWS_ACCOUNT_ID=... AWS_REGION=us-east-1 uv run cdk bootstrap
+uv run cdk deploy -c env=dev
+```
+
+Configure the deploy-time infra values (also in the README config table):
+
+- `AWS_REGION` — your region.
+- `ALERT_EMAIL` — recipient for the ops-alert SNS topic. Passed as an env var or
+  `-c alert_email=...`; surfaced as the `AlertEmailRecipient` stack output, which
+  you then subscribe manually (see the runbook's "Operational alerting" section).
+- `HEALTHZ_HOST` — the public host Route 53 pings for the prod `/healthz` check
+  (`-c healthz_host=...`).
+
+After deploy, point `forge-prod/manifest.yml` → `remotes[].baseUrl` at the
+backend URL (the `BackendUrl` stack output or your custom domain), then redeploy
+the Forge app. The [runbook](engineering/runbook.md) covers first-time AWS
+setup, the Resend API key, and production operations in detail.

@@ -1,0 +1,36 @@
+[project]
+name = "flow-intelligence-infra"
+version = "0.1.0"
+description = "AWS CDK (Python) infrastructure for Flow Intelligence"
+requires-python = ">=3.12"
+dependencies = [
+    "aws-cdk-lib>=2.170.0",
+    "constructs>=10.4.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.0",
+    "ruff>=0.8.4",
+    "mypy>=1.13.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "C4", "PIE"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["stacks", "app.py"]
+strict = false
+warn_unused_ignores = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = ["-ra", "--strict-markers"]

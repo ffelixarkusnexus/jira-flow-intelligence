@@ -1,0 +1,189 @@
+# Dependabot configuration.
+#
+# Design intent — important to read before editing:
+#
+# 1. **One grouped PR per ecosystem per week for minor/patch updates.**
+#    Without grouping, Dependabot opens N PRs per ecosystem per week (one
+#    per outdated dep) which floods the PR list and trains the team to
+#    ignore them. With `groups: minor-and-patch`, all safe semver updates
+#    in an ecosystem collapse to a single PR. Net steady-state: ~7 PRs/
+#    week across all ecosystems, all reviewable in one sitting.
+#
+# 2. **Major bumps surface as individual PRs.** Excluded from the group
+#    via `update-types`, so a `react 19→20` or `vite 6→8` lands as its
+#    own PR with full visibility — these almost always require code
+#    changes or compatibility verification and shouldn't be merged
+#    silently as part of a "safe" batch.
+#
+# 3. **Security advisories always fire individually**, regardless of
+#    grouping. Dependabot's security-update channel is separate from
+#    version-update PRs.
+#
+# 4. **Modest per-ecosystem limits.** Grouping makes the standard 5-PR
+#    cap mostly slack; keep it at 5 (or 3 for small trees) so a surprise
+#    major-bump burst doesn't blow past the cap and get throttled.
+#
+# When adding a new ecosystem, mirror the same `groups` + `ignore` block
+# below so the design stays uniform. If a tree ever needs a different
+# policy (e.g. eager major upgrades during a refactor), surface that as
+# an explicit per-ecosystem deviation, not a silent omission.
+#
+# Maintenance reference: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+
+updates:
+  # ----- Python -----------------------------------------------------------
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+    labels:
+      - dependencies
+      - python
+    commit-message:
+      prefix: chore
+      include: scope
+
+  - package-ecosystem: pip
+    directory: /infra
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+    labels:
+      - dependencies
+      - python
+      - infra
+    commit-message:
+      prefix: chore
+      include: scope
+
+  # ----- npm --------------------------------------------------------------
+  # Forge resolver (@forge/api, @forge/resolver, TS build chain). Major
+  # @forge/* bumps frequently align with platform breaking changes — keep
+  # them visible as individual PRs rather than grouping.
+  - package-ecosystem: npm
+    directory: /forge-prod
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+    labels:
+      - dependencies
+      - javascript
+      - forge
+    commit-message:
+      prefix: chore
+      include: scope
+
+  # Custom UI bundle (React, Vite, Tailwind, @forge/bridge). Customer-
+  # browser surface — @forge/bridge majors track Forge platform compat.
+  - package-ecosystem: npm
+    directory: /forge-prod/frontend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+    labels:
+      - dependencies
+      - javascript
+      - forge-ui
+    commit-message:
+      prefix: chore
+      include: scope
+
+  # ----- Docker -----------------------------------------------------------
+  # Single Dockerfile in the repo; postgres:16 base image. Group minor/
+  # patch (rare for postgres point releases) so the same shape applies.
+  - package-ecosystem: docker
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: chore
+      include: scope
+
+  # ----- GitHub Actions ---------------------------------------------------
+  # Most action updates are minor/patch (vN.x.y); the rare major bump
+  # (e.g. checkout v4→v5) gets its own PR.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: chore
+      include: scope

@@ -1,0 +1,363 @@
+name: Deploy
+
+# Deploy is gated on CI success. Previously this workflow triggered on
+# `push`, which meant red CI did nothing to block a careless deploy of
+# broken code (CI and Deploy ran in parallel; CI's verdict was
+# decorative). Now Deploy fires via `workflow_run` after the CI workflow
+# completes, and the `resolve` job's `if:` ensures we only proceed when
+# CI's conclusion was `success`. `workflow_dispatch` is preserved as an
+# explicit manual override for the rare case where the maintainer needs
+# to force a deploy despite a CI red (e.g. CI infrastructure outage).
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches:
+      - main
+      - develop
+      - "feature/**"
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Target environment (overrides branch mapping; blank = use branch mapping). One of dev/staging/prod."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  id-token: write   # for OIDC role assumption (ADR-0013)
+  contents: read
+
+concurrency:
+  # Serialize deploys per env so two pushes don't race on the same stack.
+  # For workflow_run events the branch lives on the source event, not
+  # github.ref_name (which is the default branch). Fall through to
+  # head_branch first, then manual-dispatch ref, then github.ref_name.
+  group: deploy-${{ github.event.inputs.env || github.event.workflow_run.head_branch || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve target environment
+    # Only proceed when CI succeeded OR this is an explicit manual dispatch.
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch'
+          || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      env: ${{ steps.pick.outputs.env }}
+      # SHA of the commit that CI tested. For workflow_run this is the
+      # head SHA of the CI run, NOT github.sha (which on workflow_run
+      # events points at the default branch tip, not the tested commit).
+      sha: ${{ steps.pick.outputs.sha }}
+    steps:
+      - id: pick
+        run: |
+          BRANCH="${{ github.event.workflow_run.head_branch || github.ref_name }}"
+          SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          if [ -n "${{ github.event.inputs.env }}" ]; then
+            echo "env=${{ github.event.inputs.env }}" >> "$GITHUB_OUTPUT"
+          elif [ "$BRANCH" = "main" ]; then
+            echo "env=prod" >> "$GITHUB_OUTPUT"
+          elif [ "$BRANCH" = "develop" ]; then
+            echo "env=staging" >> "$GITHUB_OUTPUT"
+          else
+            echo "env=dev" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Detect which areas the tested commit actually changed, so the deploy
+  # job below can skip work that nothing in this commit affects. Test-only
+  # and doc-only commits skip Deploy entirely (top-level `if:` below).
+  # Manual `workflow_dispatch` short-circuits all detection and treats
+  # everything as relevant so ops can force a full redeploy.
+  changes:
+    name: Detect changed areas
+    needs: resolve
+    runs-on: ubuntu-latest
+    outputs:
+      backend_image: ${{ steps.detect.outputs.backend_image }}
+      infra: ${{ steps.detect.outputs.infra }}
+      forge: ${{ steps.detect.outputs.forge }}
+      any_relevant: ${{ steps.detect.outputs.any_relevant }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          # `git diff HEAD~1 HEAD` needs the parent commit available locally.
+          fetch-depth: 2
+      - id: detect
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Manual ops override — force everything true so a `workflow_dispatch`
+            # always does a full redeploy regardless of what the latest commit
+            # touched.
+            {
+              echo "backend_image=true"
+              echo "infra=true"
+              echo "forge=true"
+              echo "any_relevant=true"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Fail-safe: if HEAD~1 isn't available (shallow clone, first commit,
+          # unusual history), force a full redeploy rather than risk silently
+          # skipping work. Better to over-deploy than to leave the image
+          # stale because we couldn't compute the diff.
+          if ! git rev-parse HEAD~1 >/dev/null 2>&1; then
+            echo "HEAD~1 unavailable — forcing full redeploy (fail-safe)."
+            {
+              echo "backend_image=true"
+              echo "infra=true"
+              echo "forge=true"
+              echo "any_relevant=true"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CHANGED=$(git diff --name-only HEAD~1 HEAD)
+          echo "Changed files vs HEAD~1:"
+          echo "$CHANGED"
+          backend_image=false
+          infra=false
+          forge=false
+          # Anything that lands in the prod Docker image: app code, the
+          # Dockerfile itself, and the Python deps that go into the build.
+          # backend/tests/** is intentionally NOT in this set — tests run in
+          # CI but never ship in the image, so they don't warrant a rebuild.
+          if echo "$CHANGED" | grep -qE '^(backend/app/|backend/alembic/|backend/Dockerfile|pyproject\.toml|uv\.lock)'; then
+            backend_image=true
+          fi
+          if echo "$CHANGED" | grep -qE '^infra/'; then
+            infra=true
+          fi
+          # Forge Custom UI + resolver + manifest. Whitelist the source
+          # paths so build outputs (forge-prod/dist/, forge-prod/static/main/)
+          # don't trigger a no-op redeploy of themselves if they accidentally
+          # end up tracked. Trigger on:
+          #   - Custom UI source under forge-prod/frontend/src/**
+          #   - resolver TS source under forge-prod/src/**
+          #   - manifest.yml
+          #   - dependency manifests (package.json + lockfiles, root + frontend)
+          #   - tsconfig changes (root + frontend variants)
+          if echo "$CHANGED" | grep -qE '^forge-prod/(frontend/src/|src/|manifest\.yml|package(-lock)?\.json|tsconfig\.json|frontend/package(-lock)?\.json|frontend/tsconfig)'; then
+            forge=true
+          fi
+          # Also redeploy when the deploy workflow itself changed — a change
+          # to deploy.yml needs to take effect by being exercised end-to-end.
+          if echo "$CHANGED" | grep -qE '^\.github/workflows/deploy\.yml$'; then
+            backend_image=true
+            infra=true
+            forge=true
+          fi
+          any_relevant=false
+          if [ "$backend_image" = "true" ] || [ "$infra" = "true" ]; then
+            any_relevant=true
+          fi
+          {
+            echo "backend_image=$backend_image"
+            echo "infra=$infra"
+            echo "forge=$forge"
+            echo "any_relevant=$any_relevant"
+          } >> "$GITHUB_OUTPUT"
+          echo "Computed: backend_image=$backend_image infra=$infra forge=$forge any_relevant=$any_relevant"
+
+  deploy:
+    name: Deploy ${{ needs.resolve.outputs.env }}
+    needs: [resolve, changes]
+    # Skip the entire deploy job when nothing the deploy can act on
+    # actually changed (e.g. backend/tests/** only, or doc-only commits
+    # that slipped through CI's paths-ignore).
+    if: needs.changes.outputs.any_relevant == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ needs.resolve.outputs.env }}
+    env:
+      ENV_NAME: ${{ needs.resolve.outputs.env }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      # CI-tested commit SHA. Use this everywhere we'd previously have used
+      # github.sha — under the workflow_run trigger, github.sha points at
+      # the default branch tip rather than the actual commit CI tested.
+      TESTED_SHA: ${{ needs.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      # ----- Toolchain -------------------------------------------------------
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
+            infra/uv.lock
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # `aws-cdk-lib` is the Python construct library; the `cdk` CLI lives
+      # in the `aws-cdk` npm package and must be installed explicitly.
+      - name: Install AWS CDK CLI
+        run: npm install -g aws-cdk@2
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ----- Stage 1: ECR ----------------------------------------------------
+      # ECR stack persists; only redeploy when backend image push or infra
+      # changes are happening (both need the repo to exist / be current).
+      - name: cdk deploy EcrStack
+        if: needs.changes.outputs.backend_image == 'true' || needs.changes.outputs.infra == 'true'
+        working-directory: infra
+        run: |
+          uv sync --group dev
+          uv run cdk deploy "FlowIntelligenceEcr-${ENV_NAME}" \
+            --require-approval never \
+            -c env="${ENV_NAME}"
+
+      # ----- Stage 2: build + push images -----------------------------------
+      # Only rebuild + push when the image actually changed (backend/app/**,
+      # Dockerfile, or Python deps). Test-only commits skip this entirely.
+      - name: ECR login
+        id: ecr-login
+        if: needs.changes.outputs.backend_image == 'true'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        if: needs.changes.outputs.backend_image == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push backend image
+        if: needs.changes.outputs.backend_image == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.ecr-login.outputs.registry }}/flow-intelligence-backend-${{ env.ENV_NAME }}:${{ env.TESTED_SHA }}
+            ${{ steps.ecr-login.outputs.registry }}/flow-intelligence-backend-${{ env.ENV_NAME }}:latest
+          cache-from: type=gha,scope=backend-${{ env.ENV_NAME }}
+          cache-to: type=gha,mode=max,scope=backend-${{ env.ENV_NAME }}
+
+      # ----- Stage 3: deploy remaining stacks -------------------------------
+      # Redeploy the AWS stacks when either the image changed (image_tag
+      # context changes → Compute needs the new tag) or CDK code changed.
+      - name: cdk diff (visibility)
+        if: needs.changes.outputs.backend_image == 'true' || needs.changes.outputs.infra == 'true'
+        working-directory: infra
+        run: |
+          uv run cdk diff \
+            "FlowIntelligenceNetwork-${ENV_NAME}" \
+            "FlowIntelligenceData-${ENV_NAME}" \
+            "FlowIntelligenceCompute-${ENV_NAME}" \
+            "FlowIntelligenceObservability-${ENV_NAME}" \
+            -c env="${ENV_NAME}" \
+            -c image_tag="${{ env.TESTED_SHA }}"
+        continue-on-error: true
+
+      - name: cdk deploy (Network, Data, Compute, Observability)
+        if: needs.changes.outputs.backend_image == 'true' || needs.changes.outputs.infra == 'true'
+        working-directory: infra
+        run: |
+          uv run cdk deploy \
+            "FlowIntelligenceNetwork-${ENV_NAME}" \
+            "FlowIntelligenceData-${ENV_NAME}" \
+            "FlowIntelligenceCompute-${ENV_NAME}" \
+            "FlowIntelligenceObservability-${ENV_NAME}" \
+            --require-approval never \
+            -c env="${ENV_NAME}" \
+            -c image_tag="${{ env.TESTED_SHA }}"
+
+      # ----- Stage 4: smoke test -------------------------------------------
+      # Smoke-test only after a backend image or infra change — those are the
+      # only deltas that could affect /healthz.
+      - name: Smoke test backend /healthz
+        if: needs.changes.outputs.backend_image == 'true' || needs.changes.outputs.infra == 'true'
+        run: |
+          BACKEND_URL=$(aws cloudformation describe-stacks \
+            --stack-name "FlowIntelligenceCompute-${ENV_NAME}" \
+            --query "Stacks[0].Outputs[?OutputKey=='BackendUrl'].OutputValue" \
+            --output text)
+          echo "Backend URL: ${BACKEND_URL}"
+          # App Runner can take ~30-60s to be ready after a fresh deploy.
+          for _ in $(seq 1 30); do
+            if curl -fsS "${BACKEND_URL}/healthz" >/dev/null; then
+              echo "✓ /healthz OK"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "✗ /healthz did not return 200 within 5min"
+          exit 1
+
+  # Forge Custom UI + resolvers + manifest are NOT shipped by the AWS deploy
+  # job above. They ship through `forge deploy`, a separate Atlassian Forge
+  # platform command that the AWS pipeline doesn't touch. Before this job
+  # existed, every commit that changed forge-prod/ required the human to
+  # remember to run `forge deploy --environment development` manually after
+  # the AWS deploy went green — and forgetting it (which happened on
+  # 2026-06-02 with the ADR-0038 Advanced settings UI) means the customer
+  # install runs old frontend code against a new backend. Schema/route
+  # drift territory.
+  #
+  # This job closes that gap for the DEVELOPMENT environment only. Forge
+  # production deploys stay manual (`cd forge-prod && forge deploy
+  # --environment production`) — pushing to main should not auto-publish
+  # to customers without an explicit human in the loop.
+  #
+  # Requires two repo-level secrets to be set (one-time):
+  #   FORGE_EMAIL      — Atlassian account email that owns the Forge app
+  #   FORGE_API_TOKEN  — token from id.atlassian.com/manage-profile/security/api-tokens
+  # The Forge CLI auto-detects these env vars. See runbook for setup
+  # instructions.
+  forge_deploy_dev:
+    name: Forge deploy (development)
+    needs: [resolve, changes]
+    if: needs.changes.outputs.forge == 'true'
+    runs-on: ubuntu-latest
+    env:
+      FORGE_EMAIL: ${{ secrets.FORGE_EMAIL }}
+      FORGE_API_TOKEN: ${{ secrets.FORGE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Forge CLI
+        run: npm install -g @forge/cli@latest
+
+      - name: Install + build resolver
+        working-directory: forge-prod
+        run: |
+          npm ci --no-fund --no-audit
+          npm run tsc
+
+      - name: Install + build Custom UI
+        working-directory: forge-prod/frontend
+        run: |
+          npm ci --no-fund --no-audit
+          npm run build
+
+      # Forge CLI requirement: --non-interactive mode refuses to run unless
+      # the usage-analytics preference is set explicitly (the CLI normally
+      # prompts the human first-run). Set it to `false` in CI so no
+      # telemetry leaves the runner. This file lives in $HOME/.forge/
+      # within the job so it persists for the subsequent forge deploy.
+      - name: Configure Forge CLI for non-interactive use
+        run: forge settings set usage-analytics false
+
+      - name: forge deploy --environment development
+        working-directory: forge-prod
+        run: forge deploy --environment development --non-interactive

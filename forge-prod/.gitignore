@@ -1,0 +1,7 @@
+node_modules/
+dist/
+static/main/index.html
+static/main/assets/
+frontend/tsconfig.tsbuildinfo
+.forge/
+*.log

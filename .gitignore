@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Node
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# Data / env
+backend/data/*.db
+.env
+.env.local
+
+# Editor / OS
+.idea/
+.DS_Store
+
+# CDK
+cdk.out/
+cdk.context.json
+
+# Local-only working notes (master prompts, scratch). Kept on disk for
+# local reference but not part of the repo.
+etc/
+
+# Per-session Claude Code state (settings, todos, transcripts, cache). Local-only.
+.claude/

@@ -1,0 +1,200 @@
+modules:
+  jira:projectPage:
+    - key: flow-intelligence-dashboard
+      resource: main
+      resolver:
+        function: dashboardResolver
+      title: Jira Flow Intelligence
+  # ADR-0044: per-issue read-only panel surfacing time-per-status data inside
+  # the Jira issue view. Uses the same `main` static bundle as the project
+  # page — the entry point inspects window.location and renders the panel
+  # when present in an issue-view context.
+  jira:issuePanel:
+    - key: flow-intelligence-issue-panel
+      resource: main
+      resolver:
+        function: issuePanelResolver
+      title: Jira Flow Intelligence
+      # Forge requires an icon for issuePanel modules; the docs site
+      # already serves the brand mark as a public asset, so reference it
+      # here rather than duplicating the file into static/main/.
+      icon: https://example.com/icon.svg
+  function:
+    - key: dashboardResolver
+      handler: index.dashboardResolver
+    # ADR-0044: backend pass-through that reads issue.key from Forge context
+    # and proxies to /api/forge/issue/{key}/panel-data.
+    - key: issuePanelResolver
+      handler: index.issuePanelResolver
+    - key: lifecycleResolver
+      handler: index.lifecycleResolver
+    - key: installResolver
+      handler: index.installLifecycleResolver
+    - key: issueWebhookResolver
+      handler: index.issueWebhookResolver
+    - key: issueDeletedResolver
+      handler: index.issueDeletedResolver
+    - key: reconcileResolver
+      handler: index.reconcileResolver
+    # Personal Data Reporting weekly trigger. Forge enforces a 23-char
+    # cap on function keys; the longer descriptive name `personalData
+    # ReportingResolver` lives in the TypeScript export and is mapped
+    # back here.
+    - key: pdrResolver
+      handler: index.personalDataReportingResolver
+    # ADR-0037: alert evaluation scheduled-trigger handlers. Two functions
+    # (one per cadence tier) since a scheduledTrigger can't pass which trigger
+    # fired. Short keys (the 23-char cap) map to the descriptive TS exports.
+    - key: alertEvalDaily
+      handler: index.dailyAlertEvalResolver
+    - key: alertEvalHourly
+      handler: index.hourlyAlertEvalResolver
+    # ADR-0033: historical backfill consumer. Reads from the
+    # `backfillqueue` produced by the install-event trigger (auto-start)
+    # or by the dashboard's `startBackfill` resolver (manual retry).
+    # timeoutSeconds: 900 (15-min budget) is the current Forge maximum,
+    # up from the 10-min default referenced in ADR-0025; the consumer
+    # re-enqueues itself when one chain exceeds it.
+    - key: backfillConsumer
+      handler: index.backfillConsumer
+      timeoutSeconds: 900
+    # ADR-0043: recompute consumer + producer. recomputeConsumer reads
+    # from `recomputequeue` and calls /api/forge/schedule/recompute-batch
+    # in a loop until done. startRecompute is invoked from the frontend's
+    # Settings save flow to push the initial task onto the queue.
+    - key: recomputeConsumer
+      handler: index.recomputeConsumer
+      timeoutSeconds: 900
+    - key: startRecompute
+      handler: index.startRecompute
+  consumer:
+    # ADR-0033: binds the `backfillqueue` to the consumer
+    # function. v2.x Async Events API expects `function:` directly
+    # (string reference to the function module key); v1's
+    # `resolver: { function, method }` form returns 400 from
+    # queue.push() — this was the unsolved bug from 2026-05-06,
+    # misdiagnosed at the time as a consumer-module-re-consent issue
+    # (see ADR-0032). Verified 2026-05-26.
+    - key: backfill-consumer
+      queue: backfillqueue
+      function: backfillConsumer
+    # ADR-0043: bind `recomputequeue` to the recomputeConsumer function.
+    - key: recompute-consumer
+      queue: recomputequeue
+      function: recomputeConsumer
+  trigger:
+    - key: forge-uninstalled
+      function: lifecycleResolver
+      events:
+        - avi:forge:uninstalled:app
+    # Auto-trigger backfill on new installs.
+    - key: forge-installed
+      function: installResolver
+      events:
+        - avi:forge:installed:app
+    # Issue-event triggers replace the manual Sync Jira button as
+    # the steady-state freshness mechanism. Forge invokes the resolver
+    # with a context carrying issue.id; the resolver fetches the full
+    # issue + changelog via requestJira and POSTs to the backend's
+    # /api/forge/sync/ingest endpoint with skip_if_stale=true.
+    - key: jira-issue-changed
+      function: issueWebhookResolver
+      events:
+        - avi:jira:created:issue
+        - avi:jira:updated:issue
+    - key: jira-issue-deleted
+      function: issueDeletedResolver
+      events:
+        - avi:jira:deleted:issue
+  scheduledTrigger:
+    # Daily reconciliation safety-net. Pulls everything updated
+    # since `tenant.last_sync_at` and re-ingests, catching any issue
+    # events Forge dropped or delivered out of order. Cap at 500 issues
+    # per pass — very high-throughput tenants need the backfill
+    # consumer instead.
+    - key: daily-reconcile
+      function: reconcileResolver
+      interval: day
+    # Personal Data Reporting compliance (Marketplace gate). Atlassian
+    # requires apps that store personal data (we store assignee.displayName
+    # + accountId) to periodically report stored accountIds to
+    # https://api.atlassian.com/app/report-accounts/ and act on
+    # `closed`/`updated` statuses. Default cycle is 7 days; weekly fires
+    # comfortably within that window.
+    - key: weekly-personal-data-reporting
+      function: pdrResolver
+      interval: week
+    # ADR-0037: proactive alert evaluation, tiered by rule threshold.
+    # daily-tier rules (>=24h threshold; all defaults) run once a day;
+    # sub-24h-threshold rules run hourly. Each trigger calls
+    # /api/alerts/evaluate-dispatch?tier=... ; the backend short-circuits
+    # the hourly sweep for tenants with no sub-day rules. Forge's interval
+    # floor is fiveMinute; hour is the finest v1 granularity (ADR-0037 §A).
+    - key: daily-alert-eval
+      function: alertEvalDaily
+      interval: day
+    - key: hourly-alert-eval
+      function: alertEvalHourly
+      interval: hour
+
+resources:
+  - key: main
+    path: static/main
+
+remotes:
+  # Prod Forge app — calls the prod AWS backend at api.example.com,
+  # which is a CNAME to the App Runner service (FlowIntelligenceCompute-prod
+  # BackendUrl output). Per ADR-0027 we use the brand domain so the URL
+  # in network requests reads as "api.example.com" instead of the
+  # opaque App Runner hostname — small but real trust signal during
+  # Atlassian's security review.
+  - key: backend
+    baseUrl: "https://api.example.com"
+    operations:
+      - fetch    # Custom UI requestRemote
+      - compute  # server-side invokeRemote from the resolver (used by syncJira)
+
+permissions:
+  scopes:
+    # Connect-style scopes — used by api.asUser() from the dashboard
+    # Custom UI (FIT-bearing browser session has user context).
+    - read:jira-work
+    - read:jira-user
+    # Granular OAuth 2.0 scopes — used by api.asApp() from server-side
+    # trigger handlers (issue webhook + scheduled reconcile). Triggers
+    # don't carry user context, so api.asUser() fails with
+    # AUTH_TYPE_UNAVAILABLE; asApp() needs these granular scopes.
+    - read:issue:jira
+    - read:issue.changelog:jira
+    - read:issue-meta:jira
+    - read:jql:jira
+    - read:project:jira
+    - read:user:jira
+    # Personal Data Reporting API. Required so api.fetch() can POST to
+    # https://api.atlassian.com/app/report-accounts/ from the weekly
+    # scheduled trigger (pdrResolver). Without this,
+    # the report-accounts endpoint returns 401 and Marketplace flags
+    # the app as non-compliant.
+    - report:personal-data
+  external:
+    fetch:
+      backend:
+        - remote: backend
+
+app:
+  runtime:
+    name: nodejs22.x
+  id: ari:cloud:ecosystem::app/REPLACE-WITH-YOUR-APP-ID
+  # Marketplace licensing: required for the Pricing tab to appear on the
+  # vendor management page. Without this flag, the app is treated as
+  # Free and the Marketplace UI hides the pricing configuration entirely
+  # (per https://developer.atlassian.com/platform/marketplace/listing-forge-apps/).
+  # Enforcement is opt-in: the resolver can read `context.license.active`
+  # and gate features when license is invalid; we don't enforce today
+  # (every install gets full features regardless of license state) since
+  # the listing isn't yet public, the only installs are our own dev /
+  # example-tenant, and Atlassian explicitly notes installs cannot
+  # complete until the listing is approved — no risk of unintended
+  # billing during this listing-prep window.
+  licensing:
+    enabled: true

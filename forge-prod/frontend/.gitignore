@@ -1,0 +1,7 @@
+# Vitest coverage output (ADR-0039). Regenerated on every test run;
+# the lcov.info uploaded by CI as an artifact is the authoritative
+# coverage snapshot, not what's on a contributor's local disk.
+coverage/
+
+# Vitest cache (test runner state)
+.vitest-cache/
