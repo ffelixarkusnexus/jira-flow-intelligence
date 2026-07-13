@@ -11,12 +11,12 @@
   },
   "dependencies": {
     "@forge/api": "^4.0.0",
-    "@forge/events": "^2.1.4",
+    "@forge/events": "^2.1.7",
     "@forge/resolver": "^1.6.0"
   },
   "devDependencies": {
-    "@forge/cli": "^12.20.0",
-    "@types/node": "^22.10.0",
+    "@forge/cli": "^12.22.0",
+    "@types/node": "^22.20.1",
     "typescript": "^5.7.0"
   },
   "engines": {
