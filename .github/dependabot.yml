@@ -51,9 +51,6 @@ updates:
       - dependency-name: "*"
         update-types:
           - "version-update:semver-major"
-    labels:
-      - dependencies
-      - python
     commit-message:
       prefix: chore
       include: scope
@@ -74,10 +71,6 @@ updates:
       - dependency-name: "*"
         update-types:
           - "version-update:semver-major"
-    labels:
-      - dependencies
-      - python
-      - infra
     commit-message:
       prefix: chore
       include: scope
@@ -102,10 +95,6 @@ updates:
       - dependency-name: "*"
         update-types:
           - "version-update:semver-major"
-    labels:
-      - dependencies
-      - javascript
-      - forge
     commit-message:
       prefix: chore
       include: scope
@@ -128,10 +117,6 @@ updates:
       - dependency-name: "*"
         update-types:
           - "version-update:semver-major"
-    labels:
-      - dependencies
-      - javascript
-      - forge-ui
     commit-message:
       prefix: chore
       include: scope
@@ -155,9 +140,6 @@ updates:
       - dependency-name: "*"
         update-types:
           - "version-update:semver-major"
-    labels:
-      - dependencies
-      - docker
     commit-message:
       prefix: chore
       include: scope
@@ -181,9 +163,6 @@ updates:
       - dependency-name: "*"
         update-types:
           - "version-update:semver-major"
-    labels:
-      - dependencies
-      - ci
     commit-message:
       prefix: chore
       include: scope
