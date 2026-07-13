@@ -3,7 +3,7 @@
 # - builder: pulls deps via uv into a venv
 # - runtime: copies the venv + app code, runs uvicorn
 
-FROM python:3.13-slim AS builder
+FROM python:3.14-slim AS builder
 
 # Install uv (matching the version in pyproject's `uv.lock` lockfile).
 COPY --from=ghcr.io/astral-sh/uv:0.10.0 /uv /uvx /usr/local/bin/
@@ -29,7 +29,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --all-extras
 
 
-FROM python:3.13-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 # `curl` is needed once at build time to fetch Atlassian's JWKS document so
 # the backend can validate Forge Invocation Tokens without public-internet
