@@ -140,6 +140,15 @@ updates:
       - dependency-name: "*"
         update-types:
           - "version-update:semver-major"
+      # Hold the backend base image at Python 3.13: the CI matrix tests
+      # 3.12/3.13 and pyproject targets 3.13, so a 3.13→3.14 image bump would
+      # run prod on a version CI does not exercise. A 3.13→3.14 docker-tag change
+      # reads as a semver-MINOR bump, so the wildcard major-only rule above does
+      # not catch it — ignore python minor+major explicitly.
+      - dependency-name: "python"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
     commit-message:
       prefix: chore
       include: scope
